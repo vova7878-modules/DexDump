@@ -13,14 +13,13 @@ import com.v7878.zygisk.ZygoteLoader;
 public class Main {
     public static String TAG = "DEX_DUMP";
 
-    @SuppressWarnings("unused")
     @DoNotShrink
     @DoNotObfuscate
     public static void premain() {
         // nop
     }
 
-    @SuppressWarnings({"unused", "ConfusingMainMethod"})
+    @SuppressWarnings("ConfusingMainMethod")
     @DoNotShrink
     @DoNotObfuscate
     public static void main() {
