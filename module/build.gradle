@@ -1,0 +1,75 @@
+import com.v7878.zygisk.gradle.ZygoteLoader
+
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.java.zygisk)
+}
+
+android {
+    namespace 'com.v7878.hooks.dexdump'
+    compileSdk 36
+
+    defaultConfig {
+        minSdk 30
+        targetSdk 36
+        versionCode 1_000_000
+        versionName "v1.0.0"
+    }
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    buildTypes {
+        release {
+            debuggable false
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles 'proguard-rules.pro'
+        }
+        debug {
+            debuggable true
+            minifyEnabled false
+            shrinkResources false
+        }
+    }
+
+    flavorDimensions += ["app"]
+    productFlavors {
+        allApps {
+            dimension "app"
+
+            zygisk {
+                packages(ZygoteLoader.ALL_PACKAGES)
+            }
+        }
+        specific {
+            dimension "app"
+
+            zygisk {
+                packages("com.v7878.test")
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+zygisk {
+    id = "com_v7878_dexdump"
+    name = "DexDump"
+    archiveName = "DexDump"
+    author = "v7878"
+    description = "Dex dumper"
+    entrypoint = "com.v7878.hooks.pmpatch.Main"
+}
+
+dependencies {
+    compileOnly project(":stub")
+
+    implementation libs.androidvmtools
+    implementation libs.r8.annotations
+}
