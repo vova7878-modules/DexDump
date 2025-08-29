@@ -1,6 +1,8 @@
 package com.v7878.hooks.pmpatch;
 
 import static com.v7878.hooks.pmpatch.Main.TAG;
+import static com.v7878.unsafe.AndroidUnsafe.ARRAY_BYTE_BASE_OFFSET;
+import static com.v7878.unsafe.Reflection.getHiddenMethods;
 import static com.v7878.unsafe.access.AccessLinker.FieldAccessKind.INSTANCE_GETTER;
 
 import android.util.Log;
@@ -8,19 +10,27 @@ import android.util.Log;
 import com.v7878.r8.annotations.DoNotOptimize;
 import com.v7878.r8.annotations.DoNotShrink;
 import com.v7878.r8.annotations.DoNotShrinkType;
+import com.v7878.unsafe.ArtMethodUtils;
+import com.v7878.unsafe.ClassUtils;
 import com.v7878.unsafe.DexFileUtils;
+import com.v7878.unsafe.ExtraMemoryAccess;
 import com.v7878.unsafe.access.AccessLinker;
 import com.v7878.unsafe.access.AccessLinker.FieldAccess;
+import com.v7878.unsafe.foreign.LibDL;
 import com.v7878.vmtools.DexFileDump;
+import com.v7878.vmtools.MMap;
 import com.v7878.zygisk.ZygoteLoader;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Modifier;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import dalvik.system.BaseDexClassLoader;
 import dalvik.system.DexFile;
@@ -49,21 +59,22 @@ public class Dumper {
             //noinspection DataFlowIssue
             var tmp_dir = new File(System.getProperty("java.io.tmpdir", "."));
             DUMP_DIR = new File(tmp_dir, "dexdump");
-            assert DUMP_DIR.mkdirs();
+            //noinspection ResultOfMethodCallIgnored
+            DUMP_DIR.mkdirs();
         }
     }
 
-    private static final Set<BaseDexClassLoader> loaders = new HashSet<>();
+    private static final Set<BaseDexClassLoader> loaders = ConcurrentHashMap.newKeySet();
     private static final Set<Long> dumped = new HashSet<>();
 
     @DoNotShrink
     public static void add_loader(ClassLoader loader) {
-        Log.w(TAG, "loader added: " + loader);
+        Log.i(TAG, "loader added: " + loader);
         loaders.add((BaseDexClassLoader) loader);
     }
 
     public static void dump() {
-        Log.w(TAG, "dump start, package: " + ZygoteLoader.getPackageName());
+        Log.i(TAG, "dump start, package: " + ZygoteLoader.getPackageName());
 
         try {
             Files.copy(new File("/proc/self/maps").toPath(),
@@ -72,6 +83,10 @@ public class Dumper {
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
+
+        var sb = new StringBuilder();
+
+        var entry_points = new HashSet<Long>();
 
         for (var loader : loaders) {
             var path_list = AccessI.INSTANCE.pathList(loader);
@@ -87,27 +102,57 @@ public class Dumper {
                                 final int first_dex = 1; // zero index is oat, not dex
                                 for (int i = first_dex; i < cookies.length; i++) {
                                     long cookie = cookies[i];
-                                    Log.w(TAG, "dump cookie: " + Long.toHexString(cookie));
+                                    Log.i(TAG, "dump cookie: " + Long.toHexString(cookie));
+
+                                    for (var class_name : DexFileUtils.getClassNameList(cookie)) {
+                                        try {
+                                            var clazz = ClassUtils.forName(class_name, false, loader);
+                                            var methods = getHiddenMethods(clazz);
+                                            for (var method : methods) {
+                                                if (Modifier.isNative(method.getModifiers())) {
+                                                    var addr = ArtMethodUtils.getExecutableData(method);
+                                                    var info = LibDL.dladdr(addr);
+                                                    sb.append(String.format("%016X", info.fbase));
+                                                    sb.append(" ");
+                                                    sb.append(String.format("%016X", info.saddr));
+                                                    sb.append(" ");
+                                                    sb.append(String.format("%016X", addr));
+                                                    sb.append(" ");
+                                                    sb.append(info.fname);
+                                                    sb.append(" ");
+                                                    sb.append(info.sname);
+                                                    sb.append(" ");
+                                                    sb.append(method);
+                                                    sb.append("\n");
+                                                    if (info.fname == null) {
+                                                        entry_points.add(addr);
+                                                    }
+                                                }
+                                            }
+                                        } catch (Throwable th) {
+                                            Log.i(TAG, "skipped " + class_name);
+                                        }
+                                    }
+
                                     if (dumped.contains(cookie)) {
-                                        Log.w(TAG, "skip, dumped already");
+                                        Log.i(TAG, "skip, dumped already");
                                         continue;
                                     }
                                     dumped.add(cookie);
 
                                     byte[] data = DexFileDump.getDexFileContent(cookie);
-                                    Log.w(TAG, "dump size: " + data.length);
-                                    String name = String.format("classes%08X.dex", Arrays.hashCode(data));
+                                    Log.i(TAG, "dump size: " + data.length);
+                                    String dex_name = String.format("classes%08X.dex", Arrays.hashCode(data));
 
-                                    File f = new File(Holder.DUMP_DIR, name);
-                                    Log.w(TAG, "dump file: " + f);
-                                    if (f.isFile()) {
-                                        Log.w(TAG, "skip, dumped already");
-                                        continue;
-                                    }
+                                    File f = new File(Holder.DUMP_DIR, dex_name);
+                                    Log.i(TAG, "dump file: " + f);
                                     try {
-                                        assert f.createNewFile();
-                                        Files.write(f.toPath(), data);
-                                        Log.w(TAG, "dump writed");
+                                        if (f.createNewFile()) {
+                                            Files.write(f.toPath(), data);
+                                            Log.i(TAG, "dump writed");
+                                        } else {
+                                            Log.i(TAG, "skip, dumped already");
+                                        }
                                     } catch (IOException e) {
                                         Log.w(TAG, "excepton", e);
                                     }
@@ -118,7 +163,56 @@ public class Dumper {
                 }
             }
         }
-        Log.w(TAG, "dump end, package: " + ZygoteLoader.getPackageName());
+
+        {
+            File f = new File(Holder.DUMP_DIR, "methods.txt");
+            try {
+                Log.i(TAG, "methods file: " + f);
+                //noinspection ReadWriteStringCanBeUsed
+                Files.write(f.toPath(), sb.toString().getBytes(StandardCharsets.UTF_8));
+                Log.i(TAG, "dump writed");
+            } catch (IOException e) {
+                Log.w(TAG, "excepton", e);
+            }
+        }
+
+        try (var maps = MMap.maps("self")) {
+            maps.forEach(entry -> {
+                if (!entry.perms().contains("r")) {
+                    return;
+                }
+                check_inside:
+                {
+                    for (var addr : entry_points) {
+                        if (entry.start() <= addr && addr < entry.end()) {
+                            break check_inside;
+                        }
+                    }
+                    return;
+                }
+
+                long copy_begin = entry.start();
+                long copy_end = entry.end();
+                long copy_size = copy_end - copy_begin;
+
+                var out = new byte[Math.toIntExact(copy_size)];
+
+                ExtraMemoryAccess.copyMemory(null, copy_begin,
+                        out, ARRAY_BYTE_BASE_OFFSET, copy_size);
+
+                File f = new File(Holder.DUMP_DIR, String.format(
+                        "%016X_%016X.bin", copy_begin, copy_end));
+                try {
+                    Log.i(TAG, "dump file: " + f);
+                    Files.write(f.toPath(), out);
+                    Log.i(TAG, "dump writed");
+                } catch (IOException e) {
+                    Log.w(TAG, "excepton", e);
+                }
+            });
+        }
+
+        Log.i(TAG, "dump end, package: " + ZygoteLoader.getPackageName());
     }
 
     public static void start() {
