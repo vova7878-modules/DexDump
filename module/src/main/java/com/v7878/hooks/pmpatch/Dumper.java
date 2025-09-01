@@ -2,9 +2,15 @@ package com.v7878.hooks.pmpatch;
 
 import static com.v7878.hooks.pmpatch.Main.TAG;
 import static com.v7878.unsafe.AndroidUnsafe.ARRAY_BYTE_BASE_OFFSET;
+import static com.v7878.unsafe.AndroidUnsafe.PAGE_SIZE;
 import static com.v7878.unsafe.Reflection.getHiddenMethods;
+import static com.v7878.unsafe.Utils.shouldNotHappen;
 import static com.v7878.unsafe.access.AccessLinker.FieldAccessKind.INSTANCE_GETTER;
+import static com.v7878.unsafe.misc.Math.roundDownUL;
+import static com.v7878.unsafe.misc.Math.roundUpUL;
 
+import android.system.ErrnoException;
+import android.system.OsConstants;
 import android.util.Log;
 
 import com.v7878.r8.annotations.DoNotOptimize;
@@ -17,6 +23,7 @@ import com.v7878.unsafe.ExtraMemoryAccess;
 import com.v7878.unsafe.access.AccessLinker;
 import com.v7878.unsafe.access.AccessLinker.FieldAccess;
 import com.v7878.unsafe.foreign.LibDL;
+import com.v7878.unsafe.io.IOUtils;
 import com.v7878.vmtools.DexFileDump;
 import com.v7878.vmtools.MMap;
 import com.v7878.zygisk.ZygoteLoader;
@@ -176,24 +183,44 @@ public class Dumper {
             }
         }
 
+        final int test = 5;
+        int[] i = {0};
+
         try (var maps = MMap.maps("self")) {
             maps.forEach(entry -> {
-                if (!entry.perms().contains("r")) {
-                    return;
-                }
-                check_inside:
-                {
-                    for (var addr : entry_points) {
-                        if (entry.start() <= addr && addr < entry.end()) {
-                            break check_inside;
-                        }
+                if (i[0] > 0) {
+                    i[0]--;
+                    if (!entry.perms().contains("r")) {
+                        int prot = OsConstants.PROT_READ;
+                        prot |= entry.perms().contains("w") ? OsConstants.PROT_WRITE : 0;
+                        prot |= entry.perms().contains("x") ? OsConstants.PROT_EXEC : 0;
+                        var start = entry.start();
+                        var size = entry.end() - start;
+                        aligned_mprotect(start, size, prot);
                     }
-                    return;
+                } else {
+                    if (!entry.perms().contains("r")) {
+                        return;
+                    }
+                    check_inside:
+                    {
+                        for (var addr : entry_points) {
+                            if (entry.start() <= addr && addr < entry.end()) {
+                                break check_inside;
+                            }
+                        }
+                        return;
+                    }
+                    i[0] = test;
                 }
 
                 long copy_begin = entry.start();
                 long copy_end = entry.end();
                 long copy_size = copy_end - copy_begin;
+
+                if (copy_size >= 1024 * 1024 * 128) { // 128 MiB
+                    return;
+                }
 
                 var out = new byte[Math.toIntExact(copy_size)];
 
@@ -213,6 +240,16 @@ public class Dumper {
         }
 
         Log.i(TAG, "dump end, package: " + ZygoteLoader.getPackageName());
+    }
+
+    public static void aligned_mprotect(long address, long length, int prot) {
+        long end = roundUpUL(address + length, PAGE_SIZE);
+        long begin = roundDownUL(address, PAGE_SIZE);
+        try {
+            IOUtils.mprotect(begin, end - begin, prot);
+        } catch (ErrnoException e) {
+            throw shouldNotHappen(e);
+        }
     }
 
     public static void start() {
