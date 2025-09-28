@@ -34,7 +34,8 @@ import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
-import java.util.Arrays;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -80,6 +81,22 @@ public class Dumper {
         loaders.add((BaseDexClassLoader) loader);
     }
 
+    private static String sigName(byte[] data) {
+        MessageDigest md;
+        try {
+            md = MessageDigest.getInstance("SHA-1");
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("unable to find SHA-1 MessageDigest", e);
+        }
+        md.update(data);
+        var signature = md.digest();
+        var sb = new StringBuilder();
+        for (var b : signature) {
+            sb.append(String.format("%02X", b & 0xff));
+        }
+        return sb.toString();
+    }
+
     public static void dump() {
         Log.i(TAG, "dump start, package: " + ZygoteLoader.getPackageName());
 
@@ -96,11 +113,13 @@ public class Dumper {
         var entry_points = new HashSet<Long>();
 
         for (var loader : loaders) {
+            Log.i(TAG, "dump loader: " + loader);
             var path_list = AccessI.INSTANCE.pathList(loader);
             if (path_list != null) {
                 var elements = AccessI.INSTANCE.dexElements(path_list);
                 if (elements != null) {
                     for (var element : elements) {
+                        Log.i(TAG, "dump element: " + element);
                         if (element != null) {
                             var dex = AccessI.INSTANCE.dexFile(element);
                             if (dex != null) {
@@ -149,7 +168,7 @@ public class Dumper {
 
                                     byte[] data = DexFileDump.getDexFileContent(cookie);
                                     Log.i(TAG, "dump size: " + data.length);
-                                    String dex_name = String.format("classes%08X.dex", Arrays.hashCode(data));
+                                    String dex_name = String.format("classes%s.dex", sigName(data));
 
                                     File f = new File(Holder.DUMP_DIR, dex_name);
                                     Log.i(TAG, "dump file: " + f);
